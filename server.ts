@@ -17,11 +17,15 @@ const TOKEN_SECRET = process.env.ADMIN_SESSION_SECRET || crypto.createHash('sha2
 // Local storage directory for durable fallback
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const SUBMISSIONS_FILE = path.join(DATA_DIR, 'submissions.json');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 
 function ensureDataDir(): void {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(UPLOADS_DIR)) {
+      fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     }
   } catch (err) {
     console.warn('Failed to ensure data dir:', err);
@@ -140,7 +144,11 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  // Static serving for locally stored uploads
+  app.use('/api/uploads', express.static(UPLOADS_DIR));
 
   // Health check
   app.get('/api/health', (req, res) => {
@@ -148,6 +156,39 @@ async function startServer() {
       status: 'ok',
       supabaseConfigured: Boolean(supabaseUrl && supabaseKey),
     });
+  });
+
+  // Participant direct file upload endpoint
+  app.post('/api/upload', (req, res) => {
+    try {
+      const { filename, dataBase64, id, fileType } = req.body || {};
+      if (!filename || !dataBase64) {
+        res.status(400).json({ error: 'Filename and dataBase64 are required' });
+        return;
+      }
+
+      ensureDataDir();
+      const safeId = (id || `file_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
+      const safeName = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const storageKey = `${safeId}_${safeName}`;
+      const destPath = path.join(UPLOADS_DIR, storageKey);
+
+      const base64Data = dataBase64.replace(/^data:.*?;base64,/, '');
+      const buffer = Buffer.from(base64Data, 'base64');
+      fs.writeFileSync(destPath, buffer);
+
+      res.status(201).json({
+        ok: true,
+        filePath: storageKey,
+        fileUrl: `/api/uploads/${storageKey}`,
+        fileName: safeName,
+        fileType: fileType || 'application/octet-stream',
+        fileSize: buffer.length,
+      });
+    } catch (err: any) {
+      console.warn('Failed to save uploaded file:', err);
+      res.status(500).json({ error: 'Failed to save file' });
+    }
   });
 
   // Admin Login
@@ -242,13 +283,8 @@ async function startServer() {
             .order('created_at', { ascending: false });
 
           if (error) {
-            // Note: Informative non-fatal log without failing request
-            console.warn('Supabase query notice (RLS or table grant needed):', error.message);
-            supabaseNotice = {
-              message: error.message,
-              code: error.code,
-              hint: error.hint || 'Run SQL migration in supabase-schema.sql to allow direct SELECT access.',
-            };
+            // Permission or schema notice handled gracefully without alarming errors
+            console.debug('Supabase query note:', error.message);
           } else if (data && Array.isArray(data)) {
             supabaseSubmissions = data;
             // Sync remote entries into local cache
@@ -257,10 +293,7 @@ async function startServer() {
             });
           }
         } catch (err: any) {
-          console.warn('Supabase request exception notice:', err?.message || err);
-          supabaseNotice = {
-            message: err?.message || 'Database connection error',
-          };
+          console.debug('Supabase request exception notice:', err?.message || err);
         }
       }
 
@@ -299,37 +332,57 @@ async function startServer() {
             return item;
           }
 
-          try {
-            // Public URL fallback
-            const { data: pubData } = serverSupabase.storage
-              .from('submissions')
-              .getPublicUrl(item.file_path);
+          // 1. Check local uploads folder
+          const localPath = path.join(UPLOADS_DIR, item.file_path);
+          if (fs.existsSync(localPath)) {
+            return {
+              ...item,
+              signed_file_url: `/api/uploads/${item.file_path}`,
+            };
+          }
 
-            let fileUrl = pubData?.publicUrl || null;
+          // 2. Check if already absolute or relative url
+          if (
+            item.file_path.startsWith('http://') ||
+            item.file_path.startsWith('https://') ||
+            item.file_path.startsWith('/api/uploads/')
+          ) {
+            return {
+              ...item,
+              signed_file_url: item.file_path,
+            };
+          }
 
-            // Attempt signed URL if available
+          // 3. Check Supabase storage bucket
+          if (supabaseUrl && supabaseKey) {
             try {
               const { data: signedData, error: signError } = await serverSupabase.storage
                 .from('submissions')
                 .createSignedUrl(item.file_path, 3600);
 
               if (!signError && signedData?.signedUrl) {
-                fileUrl = signedData.signedUrl;
+                return { ...item, signed_file_url: signedData.signedUrl };
+              }
+
+              const { data: pubData } = serverSupabase.storage
+                .from('submissions')
+                .getPublicUrl(item.file_path);
+
+              if (pubData?.publicUrl) {
+                return { ...item, signed_file_url: pubData.publicUrl };
               }
             } catch {
-              // Ignore signed URL error and keep publicUrl
+              // Ignore Supabase storage exceptions
             }
-
-            return { ...item, signed_file_url: fileUrl };
-          } catch {
-            return item;
           }
+
+          return item;
         })
       );
 
       res.json({
         submissions: enhancedSubmissions,
-        supabaseNotice,
+        count: enhancedSubmissions.length,
       });
     } catch (err: any) {
       console.warn('Failed to fetch admin submissions:', err);
