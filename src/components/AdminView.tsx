@@ -91,14 +91,17 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
         try {
           data = JSON.parse(responseText);
         } catch {
-          throw new Error(`Admin login returned an invalid response (HTTP ${res.status})`);
+          if (!res.ok) {
+            throw new Error(`Admin authentication failed (HTTP ${res.status}). Please verify server setup.`);
+          }
+          throw new Error('Invalid server response format.');
         }
-      } else {
-        throw new Error(`Admin login returned an empty response (HTTP ${res.status})`);
+      } else if (!res.ok) {
+        throw new Error(`Server error (HTTP ${res.status})`);
       }
 
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || 'Invalid password');
+      if (!res.ok || data.ok === false || !data.token) {
+        throw new Error(data.error || 'Invalid admin credentials');
       }
 
       sessionStorage.setItem('admin_session_token', data.token);

@@ -160,8 +160,39 @@ const multerUpload = multer({
 
 async function createApp() {
   const app = express();
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  // CORS middleware for preflight and cross-origin API access
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      res.status(200).end();
+      return;
+    }
+    next();
+  });
+
+  // Normalize request URLs so endpoints match with or without /api prefix
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (!req.url.startsWith('/api/') && req.url !== '/api') {
+      req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
+    }
+    next();
+  });
+
+  // Body parsing middleware (handles pre-parsed bodies from serverless runtimes gracefully)
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+      return next();
+    }
+    express.json({ limit: '50mb' })(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({ error: 'Invalid JSON payload' });
+      }
+      express.urlencoded({ extended: true, limit: '50mb' })(req, res, next);
+    });
+  });
 
   // Static serving for locally stored uploads with inline headers and CORS for PDFs
   app.use('/api/uploads', (req, res, next) => {
@@ -853,20 +884,38 @@ async function createApp() {
     }
   });
 
+  // Global Express Error Handler guaranteeing JSON responses for all API endpoints
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    console.error('API Error:', err);
+    if (res.headersSent) {
+      return next(err);
+    }
+    res.status(err.status || err.statusCode || 500).json({
+      ok: false,
+      error: err.message || 'Internal Server Error',
+    });
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production' && process.env.VERCEL !== '1') {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
+    try {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } catch (viteErr) {
+      console.warn('Vite middleware initialization notice:', viteErr);
+    }
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
   }
 
   return app;
