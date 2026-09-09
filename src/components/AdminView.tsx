@@ -19,6 +19,7 @@ import {
   X,
   AlertCircle,
   Eye,
+  Trash2,
 } from 'lucide-react';
 import { DbSubmission } from '../lib/supabase';
 
@@ -49,6 +50,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
   // Selected submission modal
   const [selectedSubmission, setSelectedSubmission] = useState<DbSubmission | null>(null);
   const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [subToDelete, setSubToDelete] = useState<DbSubmission | null>(null);
 
   // Verify token on mount
   useEffect(() => {
@@ -163,6 +166,36 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
       alert(`Could not update status: ${err.message}`);
     } finally {
       setUpdatingStatusId(null);
+    }
+  };
+
+  const handleDeleteSubmission = async (submission: DbSubmission) => {
+    if (!token) return;
+    setDeletingId(submission.id);
+
+    try {
+      const res = await fetch(`/api/admin/submissions/${submission.id}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Failed to delete submission');
+      }
+
+      // Remove from client state
+      setSubmissions((prev) => prev.filter((s) => s.id !== submission.id));
+      if (selectedSubmission?.id === submission.id) {
+        setSelectedSubmission(null);
+      }
+      setSubToDelete(null);
+    } catch (err: any) {
+      alert(`Could not delete submission: ${err.message}`);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -628,14 +661,26 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
                 )}
               </div>
 
-              {/* Action */}
-              <button
-                onClick={() => setSelectedSubmission(sub)}
-                className="w-full py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono-digits text-zinc-200 font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <span>View Full Details</span>
-                <Eye className="w-3.5 h-3.5 text-zinc-400" />
-              </button>
+              {/* Action Buttons */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedSubmission(sub)}
+                  className="flex-1 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono-digits text-zinc-200 font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <span>View Details</span>
+                  <Eye className="w-3.5 h-3.5 text-zinc-400" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSubToDelete(sub)}
+                  disabled={deletingId === sub.id}
+                  title="Delete Submission"
+                  className="p-2 rounded-xl bg-zinc-900 hover:bg-red-950/60 border border-zinc-800 hover:border-red-800/80 text-zinc-400 hover:text-red-400 transition-colors cursor-pointer shrink-0 disabled:opacity-50"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -783,6 +828,75 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
                   </a>
                 </div>
               )}
+
+              {/* Admin Actions in Modal Footer */}
+              <div className="pt-4 border-t border-zinc-800 flex items-center justify-between">
+                <div className="text-xs font-mono-digits text-zinc-500">
+                  Organizer Privileges
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSubToDelete(selectedSubmission)}
+                  disabled={deletingId === selectedSubmission.id}
+                  className="px-4 py-2 rounded-xl bg-red-950/40 hover:bg-red-950/80 border border-red-900/60 hover:border-red-700 text-red-400 hover:text-red-300 text-xs font-mono-digits font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete Project</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete Confirmation Dialog */}
+      <AnimatePresence>
+        {subToDelete && (
+          <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="w-full max-w-md p-6 rounded-2xl bg-zinc-950 border border-red-900/70 shadow-2xl space-y-4 text-left"
+            >
+              <div className="w-10 h-10 rounded-xl bg-red-950/60 border border-red-800 flex items-center justify-center text-red-400">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-display font-bold text-lg text-white">Permanently Delete Submission?</h3>
+                <p className="text-xs font-mono-digits text-zinc-400 mt-1 leading-relaxed">
+                  Are you sure you want to delete the submission by <strong className="text-white">{subToDelete.name}</strong> for <strong className="text-white">{subToDelete.challenge_title}</strong>?
+                  This will permanently remove the database record and purge associated files from storage.
+                </p>
+              </div>
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setSubToDelete(null)}
+                  disabled={deletingId === subToDelete.id}
+                  className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono-digits text-zinc-300 font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteSubmission(subToDelete)}
+                  disabled={deletingId === subToDelete.id}
+                  className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-mono-digits font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+                >
+                  {deletingId === subToDelete.id ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Deleting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Delete Permanently</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

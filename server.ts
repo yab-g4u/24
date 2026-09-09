@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
 import { createClient } from '@supabase/supabase-js';
 
@@ -142,13 +143,36 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
+// Helper: Resolve accurate MIME content type according to user specification
+function resolveContentType(filename: string, fallbackMime?: string): string {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  return fallbackMime || 'application/octet-stream';
+}
+
+// Multer in-memory storage to preserve raw binary stream without corruption
+const multerUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
+});
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  // Static serving for locally stored uploads
-  app.use('/api/uploads', express.static(UPLOADS_DIR));
+  // Static serving for locally stored uploads with inline headers and CORS for PDFs
+  app.use('/api/uploads', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (req.path.toLowerCase().endsWith('.pdf')) {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'inline');
+    }
+    next();
+  }, express.static(UPLOADS_DIR));
 
   // Health check
   app.get('/api/health', (req, res) => {
@@ -158,16 +182,203 @@ async function startServer() {
     });
   });
 
-  // Participant direct file upload endpoint
-  app.post('/api/upload', (req, res) => {
+  // Dedicated PDF streaming endpoint ensuring direct browser & canvas rendering
+  app.get('/api/storage/pdf-stream', async (req, res) => {
     try {
-      const { filename, dataBase64, id, fileType } = req.body || {};
-      if (!filename || !dataBase64) {
-        res.status(400).json({ error: 'Filename and dataBase64 are required' });
+      const rawPath = ((req.query.path as string) || '').trim();
+      if (!rawPath) {
+        res.status(400).send('Missing path parameter');
+        return;
+      }
+      const cleanPath = rawPath.replace(/^\/api\/uploads\//, '');
+      const localKey1 = cleanPath.replace(/\//g, '_');
+      const p1 = path.join(UPLOADS_DIR, localKey1);
+      const p2 = path.join(UPLOADS_DIR, cleanPath);
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+
+      if (fs.existsSync(p1)) {
+        fs.createReadStream(p1).pipe(res);
+        return;
+      }
+      if (fs.existsSync(p2)) {
+        fs.createReadStream(p2).pipe(res);
         return;
       }
 
-      ensureDataDir();
+      if (supabaseUrl && supabaseKey) {
+        const { data, error } = await serverSupabase.storage
+          .from('submissions')
+          .download(cleanPath);
+        if (!error && data) {
+          const arrayBuf = await data.arrayBuffer();
+          res.send(Buffer.from(arrayBuf));
+          return;
+        }
+      }
+
+      res.status(404).send('PDF file not found');
+    } catch (e: any) {
+      console.warn('PDF stream error:', e);
+      res.status(500).send(e?.message || 'Error streaming PDF');
+    }
+  });
+
+  // Dedicated signed URL endpoint for private Supabase bucket
+  app.get('/api/storage/signed-url', async (req, res) => {
+    try {
+      const targetPath = (req.query.path as string || '').trim();
+      if (!targetPath) {
+        res.status(400).json({ error: 'Missing path query parameter' });
+        return;
+      }
+
+      // Check if file is already on local disk
+      const localKey1 = targetPath.replace(/\//g, '_');
+      if (fs.existsSync(path.join(UPLOADS_DIR, localKey1))) {
+        res.json({ signedUrl: `/api/uploads/${localKey1}` });
+        return;
+      }
+      if (fs.existsSync(path.join(UPLOADS_DIR, targetPath))) {
+        res.json({ signedUrl: `/api/uploads/${targetPath}` });
+        return;
+      }
+
+      // Generate signed URL from Supabase if configured
+      if (supabaseUrl && supabaseKey) {
+        const { data, error } = await serverSupabase.storage
+          .from('submissions')
+          .createSignedUrl(targetPath, 60 * 60); // 1 hour validity
+
+        if (!error && data?.signedUrl) {
+          res.json({ signedUrl: data.signedUrl });
+          return;
+        }
+      }
+
+      // Fallback: return direct path
+      res.json({ signedUrl: `/api/uploads/${localKey1}` });
+    } catch (err: any) {
+      console.warn('Error creating signed URL:', err);
+      res.status(500).json({ error: err.message || 'Failed to generate signed URL' });
+    }
+  });
+
+  // Participant direct file upload endpoint (preserves raw binary data with multer, supports multiple images)
+  app.post(
+    '/api/upload',
+    multerUpload.fields([
+      { name: 'file', maxCount: 1 },
+      { name: 'files', maxCount: 15 },
+    ]),
+    async (req: Request, res: Response) => {
+      try {
+        ensureDataDir();
+
+        const filesMap = (req.files as { [fieldname: string]: Express.Multer.File[] }) || {};
+        const incomingFiles: Express.Multer.File[] = [];
+
+        if (filesMap['files'] && Array.isArray(filesMap['files'])) {
+          incomingFiles.push(...filesMap['files']);
+        }
+        if (filesMap['file'] && Array.isArray(filesMap['file'])) {
+          incomingFiles.push(...filesMap['file']);
+        }
+        if ((req as any).file) {
+          incomingFiles.push((req as any).file);
+        }
+
+        // Case 1: Binary multipart form upload(s)
+        if (incomingFiles.length > 0) {
+          const submissionId = (req.body.id || req.body.submissionId || `sub_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
+          const processedFiles: Array<{
+            filePath: string;
+            localKey: string;
+            fileUrl: string;
+            fileName: string;
+            fileType: string;
+            fileSize: number;
+          }> = [];
+
+          for (let i = 0; i < incomingFiles.length; i++) {
+            const rawFile = incomingFiles[i];
+            const originalName = rawFile.originalname || `upload_${i}.bin`;
+            const safeName = path.basename(originalName).replace(/[^a-zA-Z0-9._-]/g, '_');
+            const detectedContentType = resolveContentType(originalName, rawFile.mimetype);
+
+            // Canonical bucket file path: ${submissionId}/${index}_${safeName}
+            const prefix = incomingFiles.length > 1 ? `${i}_` : '';
+            const storageFilePath = `${submissionId}/${prefix}${safeName}`;
+            const localFileName = `${submissionId}_${prefix}${safeName}`;
+            const destPath = path.join(UPLOADS_DIR, localFileName);
+
+            // Write raw binary buffer to local disk safely
+            fs.writeFileSync(destPath, rawFile.buffer);
+
+            let signedUrl: string = `/api/uploads/${localFileName}`;
+
+            // Upload to private Supabase storage bucket
+            if (supabaseUrl && supabaseKey) {
+              try {
+                const { error: supaErr } = await serverSupabase.storage
+                  .from('submissions')
+                  .upload(storageFilePath, rawFile.buffer, {
+                    contentType: detectedContentType,
+                    upsert: false,
+                  });
+
+                if (!supaErr) {
+                  const { data: signData } = await serverSupabase.storage
+                    .from('submissions')
+                    .createSignedUrl(storageFilePath, 60 * 60);
+                  if (signData?.signedUrl) {
+                    signedUrl = signData.signedUrl;
+                  }
+                } else {
+                  console.debug('Supabase storage upload notice:', supaErr.message);
+                }
+              } catch (e: any) {
+                console.debug('Supabase storage upload notice:', e?.message || e);
+              }
+            }
+
+            processedFiles.push({
+              filePath: storageFilePath,
+              localKey: localFileName,
+              fileUrl: signedUrl,
+              fileName: originalName,
+              fileType: detectedContentType,
+              fileSize: rawFile.size,
+            });
+          }
+
+          const primary = processedFiles[0];
+          const allFilePaths = processedFiles.map((f) => f.filePath);
+          const combinedFilePath =
+            processedFiles.length > 1 ? JSON.stringify(allFilePaths) : primary.filePath;
+
+          res.status(201).json({
+            ok: true,
+            filePath: combinedFilePath,
+            localKey: primary.localKey,
+            fileUrl: primary.fileUrl,
+            fileName: primary.fileName,
+            fileType: primary.fileType,
+            fileSize: primary.fileSize,
+            files: processedFiles,
+          });
+          return;
+        }
+
+      // Case 2: JSON payload fallback
+      const { filename, dataBase64, id, fileType } = req.body || {};
+      if (!filename || !dataBase64) {
+        res.status(400).json({ error: 'Missing file. Please provide a binary file or base64 data.' });
+        return;
+      }
+
       const safeId = (id || `file_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
       const safeName = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_');
       const storageKey = `${safeId}_${safeName}`;
@@ -177,12 +388,28 @@ async function startServer() {
       const buffer = Buffer.from(base64Data, 'base64');
       fs.writeFileSync(destPath, buffer);
 
+      const resolvedMime = resolveContentType(safeName, fileType);
+      const canonicalPath = `${safeId}/${safeName}`;
+
+      if (supabaseUrl && supabaseKey) {
+        try {
+          await serverSupabase.storage
+            .from('submissions')
+            .upload(canonicalPath, buffer, {
+              contentType: resolvedMime,
+              upsert: false,
+            });
+        } catch (e) {
+          console.debug('Supabase storage upload fallback notice:', e);
+        }
+      }
+
       res.status(201).json({
         ok: true,
-        filePath: storageKey,
+        filePath: canonicalPath,
         fileUrl: `/api/uploads/${storageKey}`,
         fileName: safeName,
-        fileType: fileType || 'application/octet-stream',
+        fileType: resolvedMime,
         fileSize: buffer.length,
       });
     } catch (err: any) {
@@ -221,6 +448,142 @@ async function startServer() {
     const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : undefined;
     const isValid = verifyAdminToken(token);
     res.json({ valid: isValid });
+  });
+
+  // Public showcase submissions endpoint (generates valid signed URLs for private storage)
+  app.get('/api/submissions', async (req, res) => {
+    try {
+      const localSubmissions = readLocalSubmissions();
+      let supabaseSubmissions: any[] = [];
+
+      if (supabaseUrl && supabaseKey) {
+        try {
+          const { data } = await serverSupabase
+            .from('submissions')
+            .select('id, name, category, challenge_number, challenge_title, submission_text, submission_url, file_path, file_name, file_type, file_size, status, created_at')
+            .order('created_at', { ascending: false });
+          if (data && Array.isArray(data)) {
+            supabaseSubmissions = data;
+          }
+        } catch (e: any) {
+          console.debug('Public showcase Supabase sync notice:', e?.message || e);
+        }
+      }
+
+      const mergedMap = new Map<string, any>();
+      localSubmissions.forEach((item) => mergedMap.set(item.id, item));
+      supabaseSubmissions.forEach((item) => mergedMap.set(item.id, { ...mergedMap.get(item.id), ...item }));
+
+      const rawSubmissions = Array.from(mergedMap.values()).sort(
+        (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+      );
+
+      // Enhance submissions with proper signed or local URLs
+      const submissions = await Promise.all(
+        rawSubmissions.map(async (item: any) => {
+          let fileUrl: string | null = null;
+          let multiImages: Array<{ url: string; path: string }> = [];
+
+          // Detect multiple images JSON array
+          if (item.file_path && typeof item.file_path === 'string' && item.file_path.trim().startsWith('[')) {
+            try {
+              const parsed = JSON.parse(item.file_path);
+              if (Array.isArray(parsed)) {
+                for (const p of parsed) {
+                  let imgUrl = p;
+                  if (!p.startsWith('http') && !p.startsWith('data:')) {
+                    if (supabaseUrl && supabaseKey) {
+                      try {
+                        const { data: sData } = await serverSupabase.storage
+                          .from('submissions')
+                          .createSignedUrl(p, 60 * 60);
+                        if (sData?.signedUrl) imgUrl = sData.signedUrl;
+                      } catch {}
+                    }
+                    if (imgUrl === p) {
+                      const lKey = p.replace(/\//g, '_');
+                      imgUrl = `/api/uploads/${lKey}`;
+                    }
+                  }
+                  multiImages.push({ url: imgUrl, path: p });
+                }
+                if (multiImages.length > 0) {
+                  fileUrl = multiImages[0].url;
+                }
+              }
+            } catch (jsonErr) {
+              console.debug('Failed to parse multiple files json:', jsonErr);
+            }
+          }
+
+          if (!fileUrl && item.file_path) {
+            // If already data URL or absolute URL
+            if (
+              item.file_path.startsWith('data:') ||
+              item.file_path.startsWith('http://') ||
+              item.file_path.startsWith('https://')
+            ) {
+              fileUrl = item.file_path;
+            } else {
+              // Check local storage directory
+              const localKey1 = item.file_path.replace(/\//g, '_');
+              const localKey2 = `${item.id}_${item.file_name?.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+              if (fs.existsSync(path.join(UPLOADS_DIR, localKey1))) {
+                fileUrl = `/api/uploads/${localKey1}`;
+              } else if (fs.existsSync(path.join(UPLOADS_DIR, localKey2))) {
+                fileUrl = `/api/uploads/${localKey2}`;
+              } else if (fs.existsSync(path.join(UPLOADS_DIR, item.file_path))) {
+                fileUrl = `/api/uploads/${item.file_path}`;
+              }
+
+              // Generate signed URL for private Supabase bucket
+              if (!fileUrl && supabaseUrl && supabaseKey) {
+                try {
+                  const { data: signData, error: signErr } = await serverSupabase.storage
+                    .from('submissions')
+                    .createSignedUrl(item.file_path, 60 * 60); // 1 hour
+
+                  if (!signErr && signData?.signedUrl) {
+                    fileUrl = signData.signedUrl;
+                  }
+                } catch (e) {
+                  console.debug('Supabase showcase sign notice:', e);
+                }
+              }
+
+              // Fallback
+              if (!fileUrl) {
+                fileUrl = `/api/uploads/${localKey1}`;
+              }
+            }
+          }
+
+          return {
+            id: item.id,
+            name: item.name,
+            category: item.category,
+            challenge_number: item.challenge_number,
+            challenge_title: item.challenge_title,
+            submission_text: item.submission_text,
+            submission_url: item.submission_url,
+            file_path: item.file_path,
+            file_name: item.file_name,
+            file_type: item.file_type,
+            file_size: item.file_size,
+            file_url: fileUrl,
+            signed_file_url: fileUrl,
+            images: multiImages.length > 0 ? multiImages : undefined,
+            status: item.status || 'submitted',
+            created_at: item.created_at,
+          };
+        })
+      );
+
+      res.json({ submissions });
+    } catch (err: any) {
+      console.warn('Failed to load showcase submissions:', err);
+      res.status(500).json({ error: 'Failed to fetch showcase submissions' });
+    }
   });
 
   // Participant submission endpoint (persists to server cache and pushes to Supabase)
@@ -426,6 +789,69 @@ async function startServer() {
     } catch (err: any) {
       console.warn('Failed to update status:', err);
       res.status(500).json({ error: err.message || 'Internal Server Error' });
+    }
+  });
+
+  // Admin Delete Submission Privilege (permanently removes submission & files)
+  app.delete('/api/admin/submissions/:id', requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      if (!id) {
+        res.status(400).json({ error: 'Missing submission ID' });
+        return;
+      }
+
+      // 1. Delete from local cache
+      const list = readLocalSubmissions();
+      const target = list.find((s) => s.id === id);
+      const filtered = list.filter((s) => s.id !== id);
+      writeLocalSubmissions(filtered);
+
+      // 2. Remove associated local files if present
+      if (target?.file_path) {
+        const localKey1 = target.file_path.replace(/\//g, '_');
+        const localPath1 = path.join(UPLOADS_DIR, localKey1);
+        if (fs.existsSync(localPath1)) {
+          try {
+            fs.unlinkSync(localPath1);
+          } catch (unlinkErr) {
+            console.debug('Local unlink error:', unlinkErr);
+          }
+        }
+        const localPath2 = path.join(UPLOADS_DIR, target.file_path);
+        if (fs.existsSync(localPath2)) {
+          try {
+            fs.unlinkSync(localPath2);
+          } catch (unlinkErr) {
+            console.debug('Local unlink error:', unlinkErr);
+          }
+        }
+      }
+
+      // 3. Remove from Supabase if configured
+      if (supabaseUrl && supabaseKey) {
+        try {
+          // Delete row from submissions table
+          await serverSupabase
+            .from('submissions')
+            .delete()
+            .eq('id', id);
+
+          // If file was uploaded to bucket, remove it from storage
+          if (target?.file_path) {
+            await serverSupabase.storage
+              .from('submissions')
+              .remove([target.file_path, `${id}/${target.file_name}`]);
+          }
+        } catch (supaErr: any) {
+          console.warn('Notice: Remote Supabase deletion note:', supaErr?.message || supaErr);
+        }
+      }
+
+      res.json({ ok: true, id, message: 'Project successfully deleted' });
+    } catch (err: any) {
+      console.warn('Failed to delete submission:', err);
+      res.status(500).json({ error: err.message || 'Failed to delete submission' });
     }
   });
 

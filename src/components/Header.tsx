@@ -4,10 +4,11 @@ import { isSoundEnabled, setSoundEnabled } from '../utils/sound';
 
 interface HeaderProps {
   isLocked: boolean;
-  onResetForDemo?: () => void; // not rendered in UI per instructions
+  onLogoClick?: () => void;
+  onResetForDemo?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ isLocked }) => {
+export const Header: React.FC<HeaderProps> = ({ isLocked, onLogoClick }) => {
   const [sound, setSound] = React.useState(isSoundEnabled());
 
   const toggleSound = () => {
@@ -21,12 +22,17 @@ export const Header: React.FC<HeaderProps> = ({ isLocked }) => {
       <div className="max-w-4xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
         {/* Logo and Concept */}
         <div className="flex items-center space-x-3.5">
-          <div className="flex items-center">
-            <span className="font-display font-extrabold text-2xl tracking-tighter text-white">
+          <button
+            type="button"
+            onClick={onLogoClick}
+            className="flex items-center group cursor-pointer text-left focus:outline-none"
+            title="Return to Landing Page"
+          >
+            <span className="font-display font-extrabold text-2xl tracking-tighter text-white group-hover:text-zinc-200 transition-colors">
               24
             </span>
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#ff3b30] ml-1.5 animate-pulse" />
-          </div>
+          </button>
 
           <div className="hidden sm:flex items-center text-xs font-mono-digits tracking-wider text-zinc-400 uppercase border-l border-zinc-800 pl-3">
             <span>24 Hours</span>
