@@ -159,7 +159,7 @@ const multerUpload = multer({
   limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
 });
 
-async function startServer() {
+async function createApp() {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -869,12 +869,28 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
-  });
+  return app;
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+let appPromise: ReturnType<typeof createApp> | null = null;
+
+export default async function handler(req: Request, res: Response) {
+  if (!appPromise) {
+    appPromise = createApp();
+  }
+  const app = await appPromise;
+  return app(req, res);
+}
+
+if (process.env.VERCEL !== '1') {
+  createApp()
+    .then((app) => {
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`Server running on http://0.0.0.0:${PORT}`);
+      });
+    })
+    .catch((err) => {
+      console.error('Failed to start server:', err);
+      process.exit(1);
+    });
+}
