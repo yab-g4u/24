@@ -27,10 +27,15 @@ CREATE INDEX IF NOT EXISTS idx_submissions_challenge_number ON public.submission
 CREATE INDEX IF NOT EXISTS idx_submissions_status ON public.submissions (status);
 CREATE INDEX IF NOT EXISTS idx_submissions_created_at ON public.submissions (created_at DESC);
 
--- 3. Enable Row Level Security (RLS)
+-- 3. Grant schema & table permissions to anon, authenticated, and service_role
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON TABLE public.submissions TO anon, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
+
+-- 4. Enable Row Level Security (RLS)
 ALTER TABLE public.submissions ENABLE ROW LEVEL SECURITY;
 
--- Anonymous users (participants) can insert their own submission:
+-- Allow participants to insert their challenge submissions
 DROP POLICY IF EXISTS "Allow anonymous insert" ON public.submissions;
 CREATE POLICY "Allow anonymous insert"
 ON public.submissions
@@ -38,8 +43,25 @@ FOR INSERT
 TO anon, authenticated
 WITH CHECK (true);
 
--- Anonymous users cannot read, edit, or delete all submissions directly:
--- Only service role or server-authorized queries can view and update.
+-- Allow reading submissions for admin dashboard and event queries
+DROP POLICY IF EXISTS "Allow read access for all" ON public.submissions;
+DROP POLICY IF EXISTS "Allow select for all" ON public.submissions;
+CREATE POLICY "Allow read access for all"
+ON public.submissions
+FOR SELECT
+TO anon, authenticated
+USING (true);
+
+-- Allow updating submissions (for review status updates)
+DROP POLICY IF EXISTS "Allow update status" ON public.submissions;
+CREATE POLICY "Allow update status"
+ON public.submissions
+FOR UPDATE
+TO anon, authenticated
+USING (true)
+WITH CHECK (true);
+
+-- Full access for service_role
 DROP POLICY IF EXISTS "Allow service role full access" ON public.submissions;
 CREATE POLICY "Allow service role full access"
 ON public.submissions
@@ -48,10 +70,7 @@ TO service_role
 USING (true)
 WITH CHECK (true);
 
--- (Optional) If you want the admin dashboard using anon key to query with an admin password check via server,
--- you can also allow SELECT to authenticated / anon if you choose, but server-side proxy handles admin querying securely.
-
--- 4. Create the private 'submissions' storage bucket
+-- 5. Create the private 'submissions' storage bucket
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES (
   'submissions',

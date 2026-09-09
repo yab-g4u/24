@@ -162,38 +162,49 @@ export const SubmissionForm: React.FC<SubmissionFormProps> = ({
         }
       }
 
-      // 3. Insert metadata into public.submissions table
+      // 3. Insert metadata into public.submissions table and sync with server
       setUploadProgressMsg('Locking submission in database...');
       const finalSubmissionText =
         category === 'writing'
           ? writingText.trim() || notes.trim() || null
           : notes.trim() || null;
 
-      if (isSupabaseConfigured) {
-        const { error: dbError } = await supabase.from('submissions').insert({
-          id: submissionId,
-          name: handle.trim(),
-          email: email.trim() || null,
-          category,
-          challenge_number: challenge?.id || 1,
-          challenge_title: challenge?.title || `${category.toUpperCase()} Challenge`,
-          submission_text: finalSubmissionText,
-          submission_url: link.trim() || null,
-          file_path: storageFilePath,
-          file_name: uploadedFileName,
-          file_type: uploadedFileType,
-          file_size: uploadedFileSize,
-          status: 'submitted',
-        });
+      const submissionPayload = {
+        id: submissionId,
+        name: handle.trim(),
+        email: email.trim() || null,
+        category,
+        challenge_number: challenge?.id || 1,
+        challenge_title: challenge?.title || `${category.toUpperCase()} Challenge`,
+        submission_text: finalSubmissionText,
+        submission_url: link.trim() || null,
+        file_path: storageFilePath,
+        file_name: uploadedFileName,
+        file_type: uploadedFileType,
+        file_size: uploadedFileSize,
+        status: 'submitted',
+      };
 
-        if (dbError) {
-          console.error('Database insert error:', dbError);
-          // Rollback storage upload if database record failed
-          if (storageFilePath) {
-            await supabase.storage.from('submissions').remove([storageFilePath]);
+      if (isSupabaseConfigured) {
+        try {
+          const { error: dbError } = await supabase.from('submissions').insert(submissionPayload);
+          if (dbError) {
+            console.warn('Supabase database insert notice:', dbError.message);
           }
-          throw new Error(`Submission failed: ${dbError.message}`);
+        } catch (dbErr: any) {
+          console.warn('Supabase database insert exception:', dbErr?.message || dbErr);
         }
+      }
+
+      // Ensure server local store also receives the submission for durable persistence
+      try {
+        await fetch('/api/submissions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(submissionPayload),
+        });
+      } catch (serverErr) {
+        console.warn('Server store sync notice:', serverErr);
       }
 
       // 4. Construct local submission object

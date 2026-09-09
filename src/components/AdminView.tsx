@@ -38,6 +38,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
   const [submissions, setSubmissions] = useState<DbSubmission[]>([]);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [supabaseNotice, setSupabaseNotice] = useState<{ message: string; hint?: string } | null>(null);
+  const [copiedSql, setCopiedSql] = useState(false);
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -119,6 +121,11 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
       }
 
       setSubmissions(data.submissions || []);
+      if (data.supabaseNotice) {
+        setSupabaseNotice(data.supabaseNotice);
+      } else {
+        setSupabaseNotice(null);
+      }
     } catch (err: any) {
       setFetchError(err.message || 'Failed to load submissions');
     } finally {
@@ -420,6 +427,37 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
           </div>
         </div>
       </div>
+
+      {supabaseNotice && (
+        <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-800/60 text-xs font-mono-digits text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-semibold text-white">Database SELECT Notice: </span>
+              <span className="text-amber-300">
+                {supabaseNotice.message}. Serving submissions via local resilient store.
+              </span>
+              <p className="text-[11px] text-amber-400/80 mt-1">
+                To sync Supabase directly, run the RLS grant command in your Supabase SQL editor.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              navigator.clipboard.writeText(
+                'GRANT ALL ON TABLE public.submissions TO anon, authenticated; CREATE POLICY "Allow read access for all" ON public.submissions FOR SELECT TO anon, authenticated USING (true);'
+              );
+              setCopiedSql(true);
+              setTimeout(() => setCopiedSql(false), 2500);
+            }}
+            className="px-3 py-1.5 rounded-lg bg-amber-900/60 hover:bg-amber-800/80 text-white font-mono-digits text-xs flex items-center gap-1.5 self-start sm:self-auto shrink-0 transition-colors cursor-pointer"
+          >
+            {copiedSql ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : null}
+            <span>{copiedSql ? 'Copied SQL!' : 'Copy SQL Fix'}</span>
+          </button>
+        </div>
+      )}
 
       {fetchError && (
         <div className="p-4 rounded-xl bg-red-950/60 border border-red-800 text-xs font-mono-digits text-red-300 flex items-center justify-between">
