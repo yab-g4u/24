@@ -85,7 +85,18 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
         body: JSON.stringify({ password }),
       });
 
-      const data = await res.json();
+      const responseText = await res.text();
+      let data: { ok?: boolean; token?: string; error?: string } = {};
+      if (responseText.trim()) {
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          throw new Error(`Admin login returned an invalid response (HTTP ${res.status})`);
+        }
+      } else {
+        throw new Error(`Admin login returned an empty response (HTTP ${res.status})`);
+      }
+
       if (!res.ok || !data.ok) {
         throw new Error(data.error || 'Invalid password');
       }
