@@ -1,0 +1,7 @@
+{
+  "name": "24",
+  "description": "24 hours. One challenge. No rerolls. Let fate decide. A creative roulette challenge for design and writing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
