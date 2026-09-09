@@ -25,6 +25,12 @@ import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { WRITING_CHALLENGES } from '../data/challenges';
 import { PdfViewerModal } from './PdfViewerModal';
 
+const HIDDEN_DEMO_SUBMISSION_IDS = new Set([
+  '25e771d6-e479-4e9a-ac16-206ea08aefb6',
+  '9ff0e1c7-c3c8-465b-899b-9389d78c0c49',
+  'c6b96d38-1cb8-4607-9932-1386ee564d4a',
+]);
+
 export interface ShowcaseItem {
   id: string;
   name: string;
@@ -443,6 +449,7 @@ export const ShowcaseView: React.FC = () => {
         const name = (item.name || '').toLowerCase();
         const id = (item.id || '').toLowerCase();
         return (
+          !HIDDEN_DEMO_SUBMISSION_IDS.has(item.id) &&
           !name.includes('elena rostova') &&
           !name.includes('marcus vance') &&
           !name.includes('test participant') &&
