@@ -855,7 +855,7 @@ async function createApp() {
   });
 
   // Vite middleware for development
-  if (process.env.NODE_ENV !== 'production') {
+  if (process.env.NODE_ENV !== 'production' && process.env.VERCEL !== '1') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -875,11 +875,16 @@ async function createApp() {
 let appPromise: ReturnType<typeof createApp> | null = null;
 
 export default async function handler(req: Request, res: Response) {
-  if (!appPromise) {
-    appPromise = createApp();
+  try {
+    if (!appPromise) {
+      appPromise = createApp();
+    }
+    const app = await appPromise;
+    return app(req, res);
+  } catch (err: any) {
+    console.error('Failed to initialize API server:', err);
+    return res.status(500).json({ error: 'Failed to initialize API server' });
   }
-  const app = await appPromise;
-  return app(req, res);
 }
 
 if (process.env.VERCEL !== '1') {
