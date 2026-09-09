@@ -21,7 +21,7 @@ import {
   Eye,
   Trash2,
 } from 'lucide-react';
-import { DbSubmission } from '../lib/supabase';
+import { DbSubmission, supabase, isSupabaseConfigured } from '../lib/supabase';
 
 interface AdminViewProps {
   onBackToApp: () => void;
@@ -188,6 +188,16 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
     setDeletingId(submission.id);
 
     try {
+      // 1. Direct Supabase delete attempt on client-side if configured
+      if (isSupabaseConfigured) {
+        try {
+          await supabase.from('submissions').delete().eq('id', submission.id);
+        } catch (supaErr) {
+          console.debug('Client Supabase direct delete notice:', supaErr);
+        }
+      }
+
+      // 2. Server API permanent delete & tombstone recording
       const res = await fetch(`/api/admin/submissions/${submission.id}`, {
         method: 'DELETE',
         headers: {

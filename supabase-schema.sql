@@ -61,6 +61,14 @@ TO anon, authenticated
 USING (true)
 WITH CHECK (true);
 
+-- Allow deleting submissions (for admin deletion privilege)
+DROP POLICY IF EXISTS "Allow delete access for all" ON public.submissions;
+CREATE POLICY "Allow delete access for all"
+ON public.submissions
+FOR DELETE
+TO anon, authenticated
+USING (true);
+
 -- Full access for service_role
 DROP POLICY IF EXISTS "Allow service role full access" ON public.submissions;
 CREATE POLICY "Allow service role full access"

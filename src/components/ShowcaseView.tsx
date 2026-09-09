@@ -406,8 +406,8 @@ export const ShowcaseView: React.FC = () => {
         console.debug('Notice: Server submissions fetch fallback:', err);
       }
 
-      // 2. Fetch directly from Supabase if configured (especially beneficial on Vercel static deployment)
-      if (isSupabaseConfigured) {
+      // 2. Fetch directly from Supabase as fallback if server API is unavailable
+      if (isSupabaseConfigured && fetchedItemsMap.size === 0) {
         try {
           const { data, error } = await supabase
             .from('submissions')

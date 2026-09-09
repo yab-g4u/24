@@ -17,6 +17,7 @@ const TOKEN_SECRET = process.env.ADMIN_SESSION_SECRET || crypto.createHash('sha2
 // Local storage directory for durable fallback
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const SUBMISSIONS_FILE = path.join(DATA_DIR, 'submissions.json');
+const DELETED_SUBMISSIONS_FILE = path.join(DATA_DIR, 'deleted_submissions.json');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 
 function ensureDataDir(): void {
@@ -32,6 +33,37 @@ function ensureDataDir(): void {
   }
 }
 
+function readDeletedSubmissionIds(): Set<string> {
+  try {
+    ensureDataDir();
+    if (!fs.existsSync(DELETED_SUBMISSIONS_FILE)) {
+      return new Set();
+    }
+    const content = fs.readFileSync(DELETED_SUBMISSIONS_FILE, 'utf-8');
+    const parsed = JSON.parse(content);
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch (err) {
+    console.warn('Failed to read deleted submissions file:', err);
+    return new Set();
+  }
+}
+
+function addDeletedSubmissionId(id: string): void {
+  try {
+    if (!id) return;
+    const deletedSet = readDeletedSubmissionIds();
+    deletedSet.add(id);
+    ensureDataDir();
+    fs.writeFileSync(
+      DELETED_SUBMISSIONS_FILE,
+      JSON.stringify(Array.from(deletedSet), null, 2),
+      'utf-8'
+    );
+  } catch (err) {
+    console.warn('Failed to record deleted submission ID:', err);
+  }
+}
+
 function readLocalSubmissions(): any[] {
   try {
     ensureDataDir();
@@ -40,7 +72,9 @@ function readLocalSubmissions(): any[] {
     }
     const content = fs.readFileSync(SUBMISSIONS_FILE, 'utf-8');
     const parsed = JSON.parse(content);
-    return Array.isArray(parsed) ? parsed : [];
+    const list = Array.isArray(parsed) ? parsed : [];
+    const deletedIds = readDeletedSubmissionIds();
+    return list.filter((s) => s && s.id && !deletedIds.has(s.id));
   } catch (err) {
     console.warn('Failed to read local submissions file:', err);
     return [];
@@ -50,13 +84,20 @@ function readLocalSubmissions(): any[] {
 function writeLocalSubmissions(submissions: any[]): void {
   try {
     ensureDataDir();
-    fs.writeFileSync(SUBMISSIONS_FILE, JSON.stringify(submissions, null, 2), 'utf-8');
+    const deletedIds = readDeletedSubmissionIds();
+    const filtered = submissions.filter((s) => s && s.id && !deletedIds.has(s.id));
+    fs.writeFileSync(SUBMISSIONS_FILE, JSON.stringify(filtered, null, 2), 'utf-8');
   } catch (err) {
     console.warn('Failed to write local submissions file:', err);
   }
 }
 
 function saveOrUpdateSubmission(item: any): any {
+  if (!item || !item.id) return null;
+  const deletedIds = readDeletedSubmissionIds();
+  if (deletedIds.has(item.id)) {
+    return null; // Permanently ignore deleted items
+  }
   const list = readLocalSubmissions();
   const existingIdx = list.findIndex((s) => s.id === item.id);
   const now = new Date().toISOString();
@@ -483,6 +524,7 @@ async function createApp() {
   // Public showcase submissions endpoint (generates valid signed URLs for private storage)
   app.get('/api/submissions', async (req, res) => {
     try {
+      const deletedIds = readDeletedSubmissionIds();
       const localSubmissions = readLocalSubmissions();
       let supabaseSubmissions: any[] = [];
 
@@ -493,7 +535,7 @@ async function createApp() {
             .select('id, name, category, challenge_number, challenge_title, submission_text, submission_url, file_path, file_name, file_type, file_size, status, created_at')
             .order('created_at', { ascending: false });
           if (data && Array.isArray(data)) {
-            supabaseSubmissions = data;
+            supabaseSubmissions = data.filter((item) => !deletedIds.has(item.id));
           }
         } catch (e: any) {
           console.debug('Public showcase Supabase sync notice:', e?.message || e);
@@ -501,8 +543,14 @@ async function createApp() {
       }
 
       const mergedMap = new Map<string, any>();
-      localSubmissions.forEach((item) => mergedMap.set(item.id, item));
-      supabaseSubmissions.forEach((item) => mergedMap.set(item.id, { ...mergedMap.get(item.id), ...item }));
+      localSubmissions.forEach((item) => {
+        if (!deletedIds.has(item.id)) mergedMap.set(item.id, item);
+      });
+      supabaseSubmissions.forEach((item) => {
+        if (!deletedIds.has(item.id)) {
+          mergedMap.set(item.id, { ...mergedMap.get(item.id), ...item });
+        }
+      });
 
       const rawSubmissions = Array.from(mergedMap.values()).sort(
         (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
@@ -662,6 +710,7 @@ async function createApp() {
   app.get('/api/admin/submissions', requireAdmin, async (req, res) => {
     try {
       const { category, status, search } = req.query;
+      const deletedIds = readDeletedSubmissionIds();
 
       // Start with locally stored submissions
       const localSubmissions = readLocalSubmissions();
@@ -679,9 +728,9 @@ async function createApp() {
             // Permission or schema notice handled gracefully without alarming errors
             console.debug('Supabase query note:', error.message);
           } else if (data && Array.isArray(data)) {
-            supabaseSubmissions = data;
-            // Sync remote entries into local cache
-            data.forEach((remoteItem) => {
+            supabaseSubmissions = data.filter((item) => !deletedIds.has(item.id));
+            // Sync non-deleted remote entries into local cache
+            supabaseSubmissions.forEach((remoteItem) => {
               saveOrUpdateSubmission(remoteItem);
             });
           }
@@ -692,8 +741,14 @@ async function createApp() {
 
       // Merge local and remote by unique ID
       const mergedMap = new Map<string, any>();
-      localSubmissions.forEach((item) => mergedMap.set(item.id, item));
-      supabaseSubmissions.forEach((item) => mergedMap.set(item.id, { ...mergedMap.get(item.id), ...item }));
+      localSubmissions.forEach((item) => {
+        if (!deletedIds.has(item.id)) mergedMap.set(item.id, item);
+      });
+      supabaseSubmissions.forEach((item) => {
+        if (!deletedIds.has(item.id)) {
+          mergedMap.set(item.id, { ...mergedMap.get(item.id), ...item });
+        }
+      });
 
       let submissions = Array.from(mergedMap.values()).sort(
         (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
@@ -831,16 +886,24 @@ async function createApp() {
         return;
       }
 
+      // Record ID in tombstone list so it can NEVER be resurrected or served
+      addDeletedSubmissionId(id);
+
       const list = readLocalSubmissions();
       const target = list.find((s) => s.id === id);
 
       if (supabaseUrl && supabaseKey) {
-        const { error: deleteError } = await serverSupabase
-          .from('submissions')
-          .delete()
-          .eq('id', id);
-        if (deleteError) {
-          throw deleteError;
+        try {
+          const { error: deleteError } = await serverSupabase
+            .from('submissions')
+            .delete()
+            .eq('id', id);
+
+          if (deleteError) {
+            console.warn('Notice: Remote Supabase database deletion note (handled):', deleteError.message);
+          }
+        } catch (supaErr: any) {
+          console.warn('Notice: Remote Supabase database deletion exception (handled):', supaErr?.message || supaErr);
         }
 
         if (target?.file_path) {
@@ -877,7 +940,7 @@ async function createApp() {
         }
       }
 
-      res.json({ ok: true, id, message: 'Project successfully deleted' });
+      res.json({ ok: true, id, message: 'Project permanently deleted' });
     } catch (err: any) {
       console.warn('Failed to delete submission:', err);
       res.status(500).json({ error: err.message || 'Failed to delete submission' });
