@@ -801,13 +801,32 @@ async function startServer() {
         return;
       }
 
-      // 1. Delete from local cache
       const list = readLocalSubmissions();
       const target = list.find((s) => s.id === id);
-      const filtered = list.filter((s) => s.id !== id);
-      writeLocalSubmissions(filtered);
 
-      // 2. Remove associated local files if present
+      if (supabaseUrl && supabaseKey) {
+        const { error: deleteError } = await serverSupabase
+          .from('submissions')
+          .delete()
+          .eq('id', id);
+        if (deleteError) {
+          throw deleteError;
+        }
+
+        if (target?.file_path) {
+          try {
+            await serverSupabase.storage
+              .from('submissions')
+              .remove([target.file_path, `${id}/${target.file_name}`]);
+          } catch (storageError: any) {
+            console.warn('Notice: Remote Supabase file deletion note:', storageError?.message || storageError);
+          }
+        }
+      }
+
+      writeLocalSubmissions(list.filter((s) => s.id !== id));
+
+      // Remove associated local files if present
       if (target?.file_path) {
         const localKey1 = target.file_path.replace(/\//g, '_');
         const localPath1 = path.join(UPLOADS_DIR, localKey1);
@@ -825,26 +844,6 @@ async function startServer() {
           } catch (unlinkErr) {
             console.debug('Local unlink error:', unlinkErr);
           }
-        }
-      }
-
-      // 3. Remove from Supabase if configured
-      if (supabaseUrl && supabaseKey) {
-        try {
-          // Delete row from submissions table
-          await serverSupabase
-            .from('submissions')
-            .delete()
-            .eq('id', id);
-
-          // If file was uploaded to bucket, remove it from storage
-          if (target?.file_path) {
-            await serverSupabase.storage
-              .from('submissions')
-              .remove([target.file_path, `${id}/${target.file_name}`]);
-          }
-        } catch (supaErr: any) {
-          console.warn('Notice: Remote Supabase deletion note:', supaErr?.message || supaErr);
         }
       }
 
