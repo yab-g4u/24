@@ -167,7 +167,7 @@ const ShowcaseImageThumbnail: React.FC<{
         if (signedUrl) {
           outUrls.push(signedUrl);
         } else {
-          outUrls.push(p.startsWith('/') ? p : `/api/uploads/${p}`);
+          outUrls.push(`/api/storage/image-stream?path=${encodeURIComponent(cleanPath)}`);
         }
       }
 

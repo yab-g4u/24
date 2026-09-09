@@ -46,6 +46,15 @@ function getAccurateContentType(file: File): string {
   return file.type || 'application/octet-stream';
 }
 
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 export const SubmissionForm: React.FC<SubmissionFormProps> = ({
   category,
   challenge,
@@ -203,13 +212,39 @@ export const SubmissionForm: React.FC<SubmissionFormProps> = ({
       let immediateFileUrl: string | null = null;
       const uploadedImagesList: Array<{ url: string; path: string; name: string; size: number; type: string }> = [];
 
-      // 2. Upload raw binary file(s) via FormData
+      // 2. Upload raw binary file(s) via FormData & convert to data URLs for cross-device durability
       if (selectedFiles.length > 0) {
         setUploadProgressMsg(`Securing ${selectedFiles.length} file(s)...`);
         const primaryFile = selectedFiles[0];
         uploadedFileName = selectedFiles.map((f) => f.name).join(', ');
         uploadedFileType = getAccurateContentType(primaryFile);
         uploadedFileSize = selectedFiles.reduce((acc, f) => acc + f.size, 0);
+
+        // Pre-convert files to Data URLs for instant & cross-device preview fallback
+        const fileDataUrls: string[] = [];
+        for (const file of selectedFiles) {
+          try {
+            const dUrl = await fileToDataUrl(file);
+            if (dUrl) fileDataUrls.push(dUrl);
+          } catch (e) {
+            console.debug('Data URL conversion note:', e);
+          }
+        }
+
+        if (fileDataUrls.length > 0) {
+          immediateFileUrl = fileDataUrls[0];
+          storageFilePath = fileDataUrls.length > 1 ? JSON.stringify(fileDataUrls) : fileDataUrls[0];
+          fileDataUrls.forEach((dUrl, idx) => {
+            const curFile = selectedFiles[idx] || primaryFile;
+            uploadedImagesList.push({
+              url: dUrl,
+              path: dUrl,
+              name: curFile.name,
+              size: curFile.size,
+              type: getAccurateContentType(curFile),
+            });
+          });
+        }
 
         const formData = new FormData();
         selectedFiles.forEach((file) => {
@@ -226,17 +261,20 @@ export const SubmissionForm: React.FC<SubmissionFormProps> = ({
           });
           if (uploadRes.ok) {
             const uploadJson = await uploadRes.json();
-            if (uploadJson.fileUrl) immediateFileUrl = uploadJson.fileUrl;
-            if (uploadJson.filePath) storageFilePath = uploadJson.filePath;
+            if (uploadJson.fileUrl && !uploadJson.fileUrl.startsWith('/api/uploads/')) {
+              immediateFileUrl = uploadJson.fileUrl;
+            }
+            if (uploadJson.filePath && !uploadJson.filePath.startsWith('file_')) {
+              storageFilePath = uploadJson.filePath;
+            }
             if (uploadJson.files && Array.isArray(uploadJson.files)) {
-              uploadJson.files.forEach((f: any) => {
-                uploadedImagesList.push({
-                  url: f.fileUrl,
-                  path: f.filePath,
-                  name: f.fileName,
-                  size: f.fileSize,
-                  type: f.fileType,
-                });
+              uploadJson.files.forEach((f: any, i: number) => {
+                if (uploadedImagesList[i]) {
+                  uploadedImagesList[i].path = f.filePath || uploadedImagesList[i].path;
+                  if (f.fileUrl && !f.fileUrl.startsWith('/api/uploads/')) {
+                    uploadedImagesList[i].url = f.fileUrl;
+                  }
+                }
               });
             }
           }
@@ -269,14 +307,11 @@ export const SubmissionForm: React.FC<SubmissionFormProps> = ({
                   .createSignedUrl(curStoragePath, 60 * 60);
 
                 if (signData?.signedUrl) {
-                  if (i === 0 && !immediateFileUrl) immediateFileUrl = signData.signedUrl;
-                  uploadedImagesList.push({
-                    url: signData.signedUrl,
-                    path: curStoragePath,
-                    name: curFile.name,
-                    size: curFile.size,
-                    type: curType,
-                  });
+                  if (i === 0) immediateFileUrl = signData.signedUrl;
+                  if (uploadedImagesList[i]) {
+                    uploadedImagesList[i].url = signData.signedUrl;
+                    uploadedImagesList[i].path = curStoragePath;
+                  }
                 }
               }
             } catch (supaErr) {

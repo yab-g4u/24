@@ -297,12 +297,73 @@ async function createApp() {
     }
   });
 
+  // Dedicated Image streaming endpoint for private storage & fallback cross-device serving
+  app.get('/api/storage/image-stream', async (req, res) => {
+    try {
+      const rawPath = ((req.query.path as string) || '').trim();
+      if (!rawPath) {
+        res.status(400).send('Missing path parameter');
+        return;
+      }
+
+      if (rawPath.startsWith('data:image/')) {
+        const parts = rawPath.split(',');
+        const mimeMatch = parts[0].match(/data:(.*?);base64/);
+        const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+        const buffer = Buffer.from(parts[1], 'base64');
+        res.setHeader('Content-Type', mime);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.send(buffer);
+        return;
+      }
+
+      const cleanPath = rawPath.replace(/^\/api\/uploads\//, '');
+      const localKey1 = cleanPath.replace(/\//g, '_');
+      const p1 = path.join(UPLOADS_DIR, localKey1);
+      const p2 = path.join(UPLOADS_DIR, cleanPath);
+
+      const mimeType = resolveContentType(cleanPath);
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Access-Control-Allow-Origin', '*');
+
+      if (fs.existsSync(p1)) {
+        fs.createReadStream(p1).pipe(res);
+        return;
+      }
+      if (fs.existsSync(p2)) {
+        fs.createReadStream(p2).pipe(res);
+        return;
+      }
+
+      if (supabaseUrl && supabaseKey) {
+        const { data, error } = await serverSupabase.storage
+          .from('submissions')
+          .download(cleanPath);
+        if (!error && data) {
+          const arrayBuf = await data.arrayBuffer();
+          res.send(Buffer.from(arrayBuf));
+          return;
+        }
+      }
+
+      res.status(404).send('Image file not found');
+    } catch (e: any) {
+      console.warn('Image stream error:', e);
+      res.status(500).send(e?.message || 'Error streaming image');
+    }
+  });
+
   // Dedicated signed URL endpoint for private Supabase bucket
   app.get('/api/storage/signed-url', async (req, res) => {
     try {
       const targetPath = (req.query.path as string || '').trim();
       if (!targetPath) {
         res.status(400).json({ error: 'Missing path query parameter' });
+        return;
+      }
+
+      if (targetPath.startsWith('data:')) {
+        res.json({ signedUrl: targetPath });
         return;
       }
 
@@ -329,8 +390,8 @@ async function createApp() {
         }
       }
 
-      // Fallback: return direct path
-      res.json({ signedUrl: `/api/uploads/${localKey1}` });
+      // Fallback: return streaming URL or direct path
+      res.json({ signedUrl: `/api/storage/image-stream?path=${encodeURIComponent(targetPath)}` });
     } catch (err: any) {
       console.warn('Error creating signed URL:', err);
       res.status(500).json({ error: err.message || 'Failed to generate signed URL' });
@@ -386,9 +447,18 @@ async function createApp() {
             const destPath = path.join(UPLOADS_DIR, localFileName);
 
             // Write raw binary buffer to local disk safely
-            fs.writeFileSync(destPath, rawFile.buffer);
+            try {
+              fs.writeFileSync(destPath, rawFile.buffer);
+            } catch (fsErr) {
+              console.debug('Disk write note (handled):', fsErr);
+            }
 
+            // Universal cross-device fallback: base64 data URL for images <= 15MB
             let signedUrl: string = `/api/uploads/${localFileName}`;
+            if (rawFile.size <= 15 * 1024 * 1024 && detectedContentType.startsWith('image/')) {
+              const base64Str = rawFile.buffer.toString('base64');
+              signedUrl = `data:${detectedContentType};base64,${base64Str}`;
+            }
 
             // Upload to private Supabase storage bucket
             if (supabaseUrl && supabaseKey) {

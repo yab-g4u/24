@@ -627,42 +627,61 @@ export const AdminView: React.FC<AdminViewProps> = ({ onBackToApp }) => {
                 {/* File badge / Image preview */}
                 {sub.file_name && (
                   <div className="space-y-1.5">
-                    {sub.signed_file_url && sub.file_type?.startsWith('image/') ? (
-                      <div className="h-28 rounded-lg overflow-hidden border border-zinc-800 bg-black/50 flex items-center justify-center relative group">
-                        <img
-                          src={sub.signed_file_url}
-                          alt={sub.file_name}
-                          className="h-full w-full object-cover"
-                        />
-                        <a
-                          href={sub.signed_file_url}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-1 text-xs font-mono-digits text-white transition-opacity"
-                        >
-                          <Eye className="w-4 h-4" />
-                          <span>View Full</span>
-                        </a>
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-between p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-xs font-mono-digits">
-                        <div className="flex items-center space-x-2 truncate max-w-[180px]">
-                          <FileText className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                          <span className="text-zinc-300 truncate">{sub.file_name}</span>
+                    {(() => {
+                      const imgSrc =
+                        sub.signed_file_url ||
+                        (sub.file_path && sub.file_path.startsWith('data:') ? sub.file_path : null) ||
+                        (sub.file_url && sub.file_url.startsWith('data:') ? sub.file_url : null) ||
+                        (sub.file_path && !sub.file_path.endsWith('.pdf')
+                          ? `/api/storage/image-stream?path=${encodeURIComponent(sub.file_path)}`
+                          : null);
+
+                      const isImageFile =
+                        sub.file_type?.startsWith('image/') ||
+                        sub.category === 'design' ||
+                        Boolean(sub.file_name?.match(/\.(png|jpe?g|webp|gif|svg)$/i));
+
+                      if (isImageFile && imgSrc) {
+                        return (
+                          <div className="h-28 rounded-lg overflow-hidden border border-zinc-800 bg-black/50 flex items-center justify-center relative group">
+                            <img
+                              src={imgSrc}
+                              alt={sub.file_name}
+                              className="h-full w-full object-cover"
+                            />
+                            <a
+                              href={imgSrc}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-1 text-xs font-mono-digits text-white transition-opacity"
+                            >
+                              <Eye className="w-4 h-4" />
+                              <span>View Full</span>
+                            </a>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div className="flex items-center justify-between p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-xs font-mono-digits">
+                          <div className="flex items-center space-x-2 truncate max-w-[180px]">
+                            <FileText className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                            <span className="text-zinc-300 truncate">{sub.file_name}</span>
+                          </div>
+                          {(sub.signed_file_url || imgSrc) && (
+                            <a
+                              href={sub.signed_file_url || imgSrc!}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="text-[#ff3b30] hover:underline shrink-0 text-[11px] flex items-center gap-1 font-semibold"
+                            >
+                              <span>Open</span>
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          )}
                         </div>
-                        {sub.signed_file_url && (
-                          <a
-                            href={sub.signed_file_url}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="text-[#ff3b30] hover:underline shrink-0 text-[11px] flex items-center gap-1 font-semibold"
-                          >
-                            <span>Open</span>
-                            <ExternalLink className="w-3 h-3" />
-                          </a>
-                        )}
-                      </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 )}
 
